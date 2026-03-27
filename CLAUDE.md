@@ -1,153 +1,112 @@
-# CS108 TA Workflow
+# CS108 TA Workspace
 
 ## Overview
 
-This workspace is for managing and solving student lab activities running in Docker containers on the Bodhi platform (IITB). The workflow is: inspect container → infer lab/activity → solve → verify → save locally with TA reference notes.
+This workspace is for managing and solving student lab activities running in Docker containers on the Bodhi/cLabs platform (IITB CS108-26). The workflow is: launch container → explore → solve → verify → save locally with TA reference notes → commit.
 
 ---
 
-## Step 1: Check Running Containers
+## Credentials & Config
+
+All credentials are in `.env` (gitignored). Load them before any API call:
 
 ```bash
-docker ps
+source .env
+# or read line by line in Python: python-dotenv / manual parse
 ```
 
-Key fields to note from the output:
-- **Container name**: `clab_act_<activity_id>_<instance>` — activity ID is the number after `act_`
-- **Image**: `sarus.bodhi.cse.iitb.ac.in/bodhi_robin/<course_id>/<lab>-<language>` — gives lab number and language
-- **Ports**: which ports are exposed
-
-Example:
-```
-clab_act_2918_255   bodhi_robin/424/lab09-python   → Lab 09, Activity 2918, Python
-```
+| Variable | Value |
+|----------|-------|
+| `BODHI_TOKEN` | Bearer token for daemon + backend API |
+| `BODHI_DAEMON_URL` | `http://localhost:14014` |
+| `BODHI_BACKEND_URL` | `https://robin.bodhi.cse.iitb.ac.in/api` |
+| `COURSE_ID` | `136` (CS108-26) |
+| `USER_ID` | `2918` (24m0797@iitb.ac.in) |
 
 ---
 
-## Step 2: Explore the Container
+## Platform Architecture
 
-Always check these three locations:
+```
+cLabs UI (Electron)
+    └── clabs-daemon (Docker, port 14014)
+            ├── proxies API calls to Bodhi backend (robin.bodhi.cse.iitb.ac.in)
+            ├── manages Docker containers for each activity
+            └── serves the React frontend
+```
+
+Auth: daemon uses `Authorization: Bearer <token>` header. Backend uses `Authorization: Token <token>`.
+
+---
+
+## Container Naming Pattern
+
+```
+clab_act_<USER_ID>_<ACTIVITY_ID>
+          2918      255           ← platform activity ID, NOT a sequence number
+```
+
+Example: `clab_act_2918_255` = user 2918 doing activity 255 (Word Translator, Lab 9).
+
+---
+
+## Key API Endpoints
+
+All daemon calls use `Authorization: Bearer $BODHI_TOKEN`.
+All backend calls use `Authorization: Token $BODHI_TOKEN`.
+
+| Action | Method | URL |
+|--------|--------|-----|
+| Who am I | GET | `{daemon}/auth/whoami` |
+| List courses | GET | `{daemon}/courses/` |
+| List labs in course | GET | `{daemon}/labs/{course_id}` |
+| List activities in lab | GET | `{daemon}/activities/{lab_id}` |
+| Get activity details | GET | `{daemon}/activities/activity_details/{activity_id}` |
+| **Launch container** | POST | `{daemon}/workspace/create_folders` + body `{"activityId": N}` |
+| Container status | GET | `{daemon}/workspace/container_status?studentId={uid}&activityId={aid}` |
+| Launch progress | GET | `{daemon}/workspace/{activity_id}/progress` |
+| Stop container | GET | `{daemon}/workspace/exit_workspace?studentId={uid}&activityId={aid}` |
+| Activity details (backend) | GET | `{backend}/clab/activity/{activity_id}/` |
+
+---
+
+## Lab → Activity ID Map (CS108-26, Course 136)
+
+| Lab ID | Lab Title | Activity IDs | Docker Image |
+|--------|-----------|-------------|-------------|
+| 800 | Lab 9: Python I | 255, 256, 257, 258, 259 | `lab09-python` |
+| 804 | Lab 8: Sed/Awk | 241, 242, 243, 244, 245 | `lab-06` |
+| 797 | Lab 7: Bash | 232, 233, 234, 235 | `lab-06` |
+| 812 | Lab 6: Git | 216, 217, 218 | `lab-06` |
+| 799 | Lab 5: Make/GDB | 149, 150, 151, 152, 153 | `sl108-selenium-latest` |
+| 809 | Lab 4: JavaScript | 137, 138, 140 | `sl108-selenium-latest` |
+| 808 | Lab 3: HTML/CSS | 126, 128, 129, 130 | `sl104-3` |
+| 801 | Lab 2: Linux Adv | 120, 121, 122, 123 | `sl104-1` |
+| 802 | Lab 0: Getting Started | 1, 2, 3, 4, 5 | — |
+
+Image registry prefix: `sarus.bodhi.cse.iitb.ac.in/bodhi_robin/424/`
+
+---
+
+## Launching a Container
 
 ```bash
-docker exec <container> ls /home/labDirectory/          # student submission files
-docker exec <container> ls /clabTAWorkSpace/studentWorkSpace/   # includes testcases/
-docker exec <container> ls /clabTAWorkSpace/serverEvalScripts/autograder/
+curl -s -X POST http://localhost:14014/workspace/create_folders \
+  -H "Authorization: Bearer $BODHI_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"activityId": 255}'
 ```
 
-Read the autograder to understand:
-- What files it expects (`/home/labDirectory/` is the submission path)
-- How it scores (per-testcase, epsilon comparisons, import checks, etc.)
-- Any special pre-checks (e.g. import string detection)
-
-Read all testcase inputs and expected outputs:
+Then poll for the container to appear:
 ```bash
-docker exec <container> ls /clabTAWorkSpace/studentWorkSpace/testcases/
-# or
-docker exec <container> ls /clabTAWorkSpace/studentWorkSpace/test/
+docker ps --filter "name=clab_act_${USER_ID}_${ACTIVITY_ID}" --format "{{.Names}}"
 ```
+
+The first launch pulls the Docker image — may take 30–90s depending on image size.
 
 ---
 
-## Step 3: Infer Activity Name and Details
-
-From the image name and container name:
-- **Lab number**: from image tag (e.g. `lab09`)
-- **Activity ID**: from container name (e.g. `act_2918`)
-- **Language**: from image tag (e.g. `python`)
-- **Activity name**: inferred from the student files and testcases (not always explicitly stated)
-- **Course**: from image path (e.g. `424`)
-
----
-
-## Step 4: Write the Solution
-
-- Read all student skeleton files in `/home/labDirectory/`
-- Read all testcase input/output files to understand exact expected format
-- Read the autograder (`autograder.py` or `evaluate.sh`) for scoring logic and edge cases
-- Write the solution locally at `/tmp/<filename>`
-- Copy into the container's submission directory:
-
-```bash
-docker cp /tmp/<file> <container>:/home/labDirectory/<file>
-```
-
-**Important:** Always write to `/home/labDirectory/` — this is what the autograder reads. The `/clabTAWorkSpace/studentWorkSpace/` directory is a mirror but is NOT what gets evaluated.
-
----
-
-## Step 5: Verify All Testcases
-
-Run testcases manually inside the container before considering done. Either:
-
-**For shell-script based testcases** (compare stdout):
-```bash
-for tc in q1_1 q1_2 ...; do
-  cmd=$(docker exec <container> cat /clabTAWorkSpace/studentWorkSpace/testcases/${tc}.sh)
-  expected=$(docker exec <container> cat /clabTAWorkSpace/studentWorkSpace/testcases/out_${tc}.txt)
-  actual=$(docker exec -w /home/labDirectory <container> bash -c "$cmd")
-  [ "$actual" = "$expected" ] && echo "PASS $tc" || echo "FAIL $tc"
-done
-```
-
-**For Python-based testcases** (inline verification):
-```bash
-docker exec -w /home/labDirectory <container> python3 -c "
-# import solution, run each testcase, compare against expected
-"
-```
-
-All testcases must pass before moving on.
-
----
-
-## Step 6: Save Locally
-
-### Folder structure
-
-```
-CS108-2026/
-└── lab<NN>/
-    ├── act1-<activity-name>/
-    │   ├── <solution_file(s)>
-    │   └── solution.md
-    └── act2-<activity-name>/
-        ├── <solution_file(s)>
-        └── solution.md
-```
-
-Create the subfolder and copy the solution:
-```bash
-mkdir -p lab<NN>/act<N>-<name>
-cp /tmp/<file> lab<NN>/act<N>-<name>/
-```
-
-### Write solution.md
-
-Each `solution.md` is a TA reference guide. It must include:
-
-1. **Problem summary** — what the activity asks, modes/functions, input/output format
-2. **Key insight** — the non-obvious part of the solution (algorithmic trick, edge case, etc.)
-3. **Core approach** — data structure or algorithm used, with concise code snippets
-4. **Per-function/mode breakdown** — what each part does and common mistakes for each
-5. **Full testcase table** — all inputs and expected outputs in one place
-6. **Quick debugging table** — symptom → likely cause, for fast student help
-
-The goal: a TA should be able to help any student using only the `solution.md`, without re-reading the code.
-
----
-
-## Naming Conventions
-
-| Thing | Convention |
-|-------|-----------|
-| Local lab folder | `lab09/`, `lab10/`, etc. |
-| Local activity subfolder | `act1-word-translator/`, `act2-complex-polar/` |
-| Activity name | Inferred from files; use kebab-case |
-| solution.md | Always named exactly `solution.md` |
-
----
-
-## Quick Reference: Key Paths Inside Container
+## Key Paths Inside Every Container
 
 | Path | Purpose |
 |------|---------|
@@ -156,4 +115,67 @@ The goal: a TA should be able to help any student using only the `solution.md`, 
 | `/clabTAWorkSpace/studentWorkSpace/testcases/` or `/test/` | Testcase inputs and expected outputs |
 | `/clabTAWorkSpace/serverEvalScripts/evaluate.sh` | Eval entry point |
 | `/clabTAWorkSpace/serverEvalScripts/autograder/` | Autograder scripts |
-| `/home/.evaluationScripts/evaluate.json` | Live evaluation results (updated after grader runs) |
+| `/home/.evaluationScripts/` | Instructor-side eval scripts (read-only reference) |
+| `/home/.evaluationScripts/evaluate.json` | Live evaluation results |
+
+**Always write solutions to `/home/labDirectory/`** — not the workspace mirror.
+
+---
+
+## Standard Solve Workflow
+
+1. **Launch** container via API (or user does it via UI)
+2. **Explore** — read skeleton files, testcases, autograder
+3. **Solve** — write solution to `/tmp/`, then `docker cp` to `/home/labDirectory/`
+4. **Verify** — run all testcases inside container, confirm all pass
+5. **Save locally** — create `lab<NN>/act<N>-<name>/` with solution + `solution.md`
+6. **Commit & push** — `git add lab<NN>/` → commit → push
+
+---
+
+## Local Folder Structure
+
+```
+CS108-2026/
+├── .env                    ← credentials (gitignored)
+├── .gitignore
+├── CLAUDE.md
+├── .claude/
+│   └── commands/
+│       ├── solve-activity.md   ← /solve-activity: solve the currently running container
+│       └── solve-lab.md        ← /solve-lab N: launch + solve all activities in lab N
+└── lab<NN>/
+    ├── act1-<name>/
+    │   ├── <solution_file(s)>
+    │   └── solution.md
+    └── act2-<name>/
+        ├── <solution_file(s)>
+        └── solution.md
+```
+
+---
+
+## solution.md Template
+
+Every `solution.md` must include:
+
+1. **Problem summary** — what the activity asks, modes/functions, input/output format
+2. **Key insight** — the non-obvious algorithmic trick or edge case
+3. **Core approach** — data structure or algorithm with concise code snippets
+4. **Per-function/mode breakdown** — what each part does and common mistakes
+5. **Full testcase table** — all inputs and expected outputs
+6. **Quick debugging table** — symptom → likely cause
+
+Goal: a TA can help any student using only `solution.md`, without re-reading the code.
+
+---
+
+## Lab 9 Activity Reference (Solved)
+
+| Activity ID | Name | Key Insight |
+|-------------|------|-------------|
+| 255 | Word Translator | BFS for indirect translations via intermediate language |
+| 256 | Basic Maths (Complex/Polar) | Implement modulus, arg, abscissa, ordinate, distance; must import classes correctly |
+| 257 | Olympics | Aggregate medals across files; sort by gold desc, ties alphabetically |
+| 258 | Casino Dice | DP: count ordered dice-roll sequences summing to N, mod 10^9+7 |
+| 259 | Tower of Hanoi | Standard recursion; print move count on line 1, then `src dst` per line |
