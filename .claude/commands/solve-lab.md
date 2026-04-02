@@ -109,9 +109,28 @@ docker stop clab_act_${USER_ID}_${ACTIVITY_ID}
 
 ---
 
-## Step 8: Commit After All Activities Done
+## Step 8: Submit the Activity
 
-After all activities in the lab are solved, create a single commit:
+Submit the solution to the Bodhi backend. The daemon uses the host-side workspace files (persisted at `~/Documents/clabWorkspace/<email>/<activity_id>/labDirectory/`) — the container does NOT need to be running.
+
+```bash
+curl -s -X POST "http://localhost:14014/evaluate/submit/${ACTIVITY_ID}" \
+  -H "Authorization: Bearer ${BODHI_TOKEN}"
+```
+
+Expected response: `{"message": "Submission successful"}`
+
+Verify the submission landed:
+```bash
+curl -s "http://localhost:14014/submission/${ACTIVITY_ID}" \
+  -H "Authorization: Bearer ${BODHI_TOKEN}"
+```
+
+---
+
+## Step 9: Commit After All Activities Done
+
+After all activities in the lab are solved and submitted, create a single commit:
 
 ```bash
 git add lab<NN>/
